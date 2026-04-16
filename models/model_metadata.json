@@ -1,0 +1,57 @@
+{
+  "selected_model": "segment_popularity",
+  "global_baseline_valid": {
+    "precision_at_3": 0.07893796296296084,
+    "recall_at_3": 0.775504998064586,
+    "map_at_3": 0.5849054252951448,
+    "ndcg_at_3": 0.6502428378173388,
+    "rows": 120000.0,
+    "rows_with_target": 30024.666666666668,
+    "months": 3.0
+  },
+  "global_baseline_test": {
+    "precision_at_3": 0.07036666666665176,
+    "recall_at_3": 0.7713613663667298,
+    "map_at_3": 0.5753036557864691,
+    "ndcg_at_3": 0.6414584547093521,
+    "rows": 120000.0,
+    "rows_with_target": 27305.5,
+    "months": 2.0
+  },
+  "segment_baseline_valid": {
+    "precision_at_3": 0.07961296296296155,
+    "recall_at_3": 0.7402800024911583,
+    "map_at_3": 0.6214790677259249,
+    "ndcg_at_3": 0.6592281246434344,
+    "rows": 120000.0,
+    "rows_with_target": 30024.666666666668,
+    "months": 3.0
+  },
+  "segment_baseline_test": {
+    "precision_at_3": 0.07005833333332312,
+    "recall_at_3": 0.7324104020242435,
+    "map_at_3": 0.6180377328922511,
+    "ndcg_at_3": 0.654623627255965,
+    "rows": 120000.0,
+    "rows_with_target": 27305.5,
+    "months": 2.0
+  },
+  "supervised_sgd_valid": {
+    "precision_at_3": 0.03304166666666963,
+    "recall_at_3": 0.333080720915066,
+    "map_at_3": 0.18395434807769837,
+    "ndcg_at_3": 0.22639381260450164,
+    "rows": 120000.0,
+    "rows_with_target": 30024.666666666668,
+    "months": 3.0
+  },
+  "supervised_sgd_test": {
+    "precision_at_3": 0.030558333333336782,
+    "recall_at_3": 0.33530646762364014,
+    "map_at_3": 0.1850898656765951,
+    "ndcg_at_3": 0.22772935024553226,
+    "rows": 120000.0,
+    "rows_with_target": 27305.5,
+    "months": 2.0
+  }
+}

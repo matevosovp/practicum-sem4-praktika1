@@ -1,0 +1,130 @@
+"""Shared data constants."""
+
+from __future__ import annotations
+
+PRODUCT_COLUMNS = [
+    "ind_ahor_fin_ult1",
+    "ind_aval_fin_ult1",
+    "ind_cco_fin_ult1",
+    "ind_cder_fin_ult1",
+    "ind_cno_fin_ult1",
+    "ind_ctju_fin_ult1",
+    "ind_ctma_fin_ult1",
+    "ind_ctop_fin_ult1",
+    "ind_ctpp_fin_ult1",
+    "ind_deco_fin_ult1",
+    "ind_deme_fin_ult1",
+    "ind_dela_fin_ult1",
+    "ind_ecue_fin_ult1",
+    "ind_fond_fin_ult1",
+    "ind_hip_fin_ult1",
+    "ind_plan_fin_ult1",
+    "ind_pres_fin_ult1",
+    "ind_reca_fin_ult1",
+    "ind_tjcr_fin_ult1",
+    "ind_valo_fin_ult1",
+    "ind_viv_fin_ult1",
+    "ind_nomina_ult1",
+    "ind_nom_pens_ult1",
+    "ind_recibo_ult1",
+]
+
+PRODUCT_NAME_MAP = {
+    "ind_ahor_fin_ult1": "Savings account",
+    "ind_aval_fin_ult1": "Guarantees",
+    "ind_cco_fin_ult1": "Current accounts",
+    "ind_cder_fin_ult1": "Derivates account",
+    "ind_cno_fin_ult1": "Payroll account",
+    "ind_ctju_fin_ult1": "Junior account",
+    "ind_ctma_fin_ult1": "More particular account",
+    "ind_ctop_fin_ult1": "Particular account",
+    "ind_ctpp_fin_ult1": "Particular plus account",
+    "ind_deco_fin_ult1": "Short-term deposits",
+    "ind_deme_fin_ult1": "Medium-term deposits",
+    "ind_dela_fin_ult1": "Long-term deposits",
+    "ind_ecue_fin_ult1": "E-account",
+    "ind_fond_fin_ult1": "Funds",
+    "ind_hip_fin_ult1": "Mortgage",
+    "ind_plan_fin_ult1": "Pensions plan",
+    "ind_pres_fin_ult1": "Loans",
+    "ind_reca_fin_ult1": "Taxes",
+    "ind_tjcr_fin_ult1": "Credit card",
+    "ind_valo_fin_ult1": "Securities",
+    "ind_viv_fin_ult1": "Home account",
+    "ind_nomina_ult1": "Payroll",
+    "ind_nom_pens_ult1": "Pensions payroll",
+    "ind_recibo_ult1": "Direct debit",
+}
+
+RAW_FEATURE_COLUMNS = [
+    "fecha_dato",
+    "ncodpers",
+    "ind_empleado",
+    "pais_residencia",
+    "sexo",
+    "age",
+    "fecha_alta",
+    "ind_nuevo",
+    "antiguedad",
+    "indrel",
+    "ult_fec_cli_1t",
+    "indrel_1mes",
+    "tiprel_1mes",
+    "indresi",
+    "indext",
+    "conyuemp",
+    "canal_entrada",
+    "indfall",
+    "tipodom",
+    "cod_prov",
+    "nomprov",
+    "ind_actividad_cliente",
+    "renta",
+    "segmento",
+]
+
+SELECTED_COLUMNS = RAW_FEATURE_COLUMNS + PRODUCT_COLUMNS
+
+NUMERIC_COLUMNS = [
+    "age",
+    "ind_nuevo",
+    "antiguedad",
+    "indrel",
+    "tipodom",
+    "cod_prov",
+    "ind_actividad_cliente",
+    "renta",
+]
+
+CATEGORICAL_COLUMNS = [
+    "ind_empleado",
+    "pais_residencia",
+    "sexo",
+    "indrel_1mes",
+    "tiprel_1mes",
+    "indresi",
+    "indext",
+    "conyuemp",
+    "canal_entrada",
+    "indfall",
+    "nomprov",
+    "segmento",
+]
+
+DATE_COLUMNS = ["fecha_dato", "fecha_alta", "ult_fec_cli_1t"]
+
+MONTHLY_DATASET_COLUMNS = [
+    "fecha_dato",
+    "target_month",
+    "ncodpers",
+    "month_number",
+    "customer_since_months",
+    "prev_products_total",
+    "products_total",
+    "products_added_prev_month",
+    "products_dropped_prev_month",
+    "has_any_new_product",
+    *NUMERIC_COLUMNS,
+    *CATEGORICAL_COLUMNS,
+    *PRODUCT_COLUMNS,
+]

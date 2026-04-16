@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: bank-product-api
+    environment:
+      API_MODEL_PATH: /app/models/best_model.joblib
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: bank-product-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
