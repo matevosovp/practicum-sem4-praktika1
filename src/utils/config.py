@@ -13,10 +13,14 @@ def _env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
 @dataclass(slots=True)
 class ProjectConfig:
     """Project-wide paths and modeling parameters."""
 
+    project_root: Path = PROJECT_ROOT
     random_state: int = int(_env("PROJECT_RANDOM_STATE", "42"))
     raw_data_path: Path = Path(_env("RAW_DATA_PATH", "train_ver2.csv"))
     processed_dir: Path = Path(_env("PROCESSED_DIR", "data/processed"))
@@ -73,6 +77,19 @@ class ProjectConfig:
     api_host: str = _env("API_HOST", "0.0.0.0")
     api_port: int = int(_env("API_PORT", "8000"))
     prometheus_enabled: bool = _env("PROMETHEUS_ENABLED", "true").lower() == "true"
+
+    def __post_init__(self) -> None:
+        self.project_root = Path(self.project_root).resolve()
+        self.raw_data_path = self._resolve_path(self.raw_data_path)
+        self.processed_dir = self._resolve_path(self.processed_dir)
+        self.eda_dir = self._resolve_path(self.eda_dir)
+        self.models_dir = self._resolve_path(self.models_dir)
+        self.mlruns_dir = self._resolve_path(self.mlruns_dir)
+        self.api_model_path = self._resolve_path(self.api_model_path)
+
+    def _resolve_path(self, path: Path) -> Path:
+        path = Path(path)
+        return path if path.is_absolute() else self.project_root / path
 
     @property
     def monthly_dir(self) -> Path:
