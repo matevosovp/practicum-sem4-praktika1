@@ -83,7 +83,7 @@
 - `stage_01_segment_popularity`: baseline после улучшения сегментацией по `segmento`;
 - `stage_02_catboost_basic`: первая CatBoost-модель на сырых клиентских признаках и текущем продуктном портфеле;
 - `stage_03_catboost_feature_engineering`: CatBoost после добавления engineered temporal / portfolio features;
-- `stage_04_catboost_tuned`: финальный CatBoost после двухступенчатого, ресурсно-ограниченного подбора гиперпараметров.
+- `stage_04_catboost_tuned`: финальный CatBoost после двухступенчатого компактного подбора гиперпараметров.
 
 Итоговая основная модель проекта — **CatBoost**. Для продового артефакта `best_model.joblib` выбирается лучшая именно среди CatBoost-стадий, а baseline'ы остаются как честная точка сравнения.
 
@@ -94,14 +94,13 @@
 - формирование multilabel-таргета на `t+1`;
 - time-based split;
 - downsampling негативных примеров на train без затрагивания validation/test;
-- ограничение полного train sample через cap `TRAIN_MAX_ROWS`, чтобы CatBoost не раздувался по памяти на редких продуктах;
+- ограничение полного train sample через cap `TRAIN_MAX_ROWS` для воспроизводимых экспериментов;
 - облегчённые dtypes в modeling parquet и column-pruned чтение под конкретную стадию;
-- memory-safe one-vs-rest CatBoost: продуктовые модели обучаются строго последовательно, сразу сохраняются в stage-директорию и выгружаются из памяти;
-- явный `del` и `gc.collect()` после каждой продуктовой модели и после каждой крупной stage-структуры;
-- CatBoost с нативной работой по категориальным признакам без ручного one-hot и с memory-aware ограничениями по CTR/threads;
+- one-vs-rest CatBoost: продуктовые модели обучаются последовательно и сохраняются в stage-директорию;
+- CatBoost с нативной работой по категориальным признакам без ручного one-hot;
 - фиксированный `eval_set` и `early_stopping` для всех CatBoost-стадий;
 - двухступенчатый tuning вместо тяжелого глобального поиска:
-  - Stage A: быстрый screening компактного ручного набора memory-safe конфигураций на последних train-месяцах и sampled validation;
+  - Stage A: быстрый screening компактного ручного набора конфигураций на последних train-месяцах и sampled validation;
   - Stage B: подтверждение только top-N конфигураций на полном train sample;
 - feature importance только для осмысленных CatBoost-стадий, а не для каждого промежуточного run;
 - расчёт ranking-метрик и анализ ошибок.
@@ -152,6 +151,28 @@ Endpoint'ы:
 Главная метрика для сравнения runs в MLflow: `val_map_at_3`.
 
 Актуальные метрики сохраняются в `models/model_metadata.json` и в MLflow по каждому stage-run отдельно.
+
+На актуальном прогоне из [02_modeling_experiments.ipynb](/home/what/praktika/practicum-sem4-praktika1/notebooks/02_modeling_experiments.ipynb) получились такие результаты:
+
+| Stage | Validation MAP@3 | Test MAP@3 |
+| --- | ---: | ---: |
+| `stage_00_global_popularity` | 0.5849 | 0.5753 |
+| `stage_01_segment_popularity` | 0.6215 | 0.6180 |
+| `stage_02_catboost_basic` | 0.6302 | 0.6211 |
+| `stage_03_catboost_feature_engineering` | 0.6586 | 0.6505 |
+| `stage_04_catboost_tuned` | **0.6641** | **0.6527** |
+
+Финальная tuned-модель улучшает:
+
+- `stage_03_catboost_feature_engineering` на `+0.0054` по `val_map_at_3`;
+- `stage_02_catboost_basic` на `+0.0339` по `val_map_at_3`;
+- глобальный baseline на `+0.0791` по `val_map_at_3`.
+
+Лучшая конфигурация после двухступенчатого tuning:
+
+- Stage A winner: `stage_04a_candidate_02`, `val_map_at_3 = 0.6731`;
+- Stage B winner: `stage_04b_candidate_03`, `val_map_at_3 = 0.6641`, `test_map_at_3 = 0.6527`;
+- зарегистрированная модель: `bank-product-recommendations-catboost`, alias `champion`, version `5`.
 
 ### Мониторинг
 
@@ -210,12 +231,11 @@ source .venv_rec_prod/bin/activate
 bash scripts/train_model.sh
 ```
 
-Ключевые memory-safe параметры:
+Полезные env-параметры:
 
 ```bash
-CATBOOST_PROFILE=memory_safe
-CATBOOST_RAM_LIMIT=12gb
 CATBOOST_THREAD_COUNT=2
+CATBOOST_TUNING_ENABLED=true
 TRAIN_MAX_ROWS=350000
 TUNING_STAGE_A_CANDIDATE_COUNT=4
 TUNING_STAGE_B_TOP_N=2
@@ -234,16 +254,16 @@ python -m src.models.train
 После этого открыть ноутбук 01_eda.ipynb
 
 
-Если нагрузку на машину, можно запускать так:
+Если нужен воспроизводимый запуск с ограниченной train-выборкой:
 
 ```bash
-CATBOOST_PROFILE=memory_safe CATBOOST_RAM_LIMIT=12gb CATBOOST_THREAD_COUNT=2 CATBOOST_TUNING_ENABLED=true TRAIN_MAX_ROWS=300000 TUNING_STAGE_A_MAX_ROWS=120000 TUNING_STAGE_A_CANDIDATE_COUNT=4 bash scripts/train_model.sh
+CATBOOST_THREAD_COUNT=2 CATBOOST_TUNING_ENABLED=true TRAIN_MAX_ROWS=300000 TUNING_STAGE_A_MAX_ROWS=120000 TUNING_STAGE_A_CANDIDATE_COUNT=4 bash scripts/train_model.sh
 ```
 
 Если нужен только быстрый smoke-прогон без hyperparameter search:
 
 ```bash
-CATBOOST_PROFILE=memory_safe CATBOOST_RAM_LIMIT=12gb CATBOOST_THREAD_COUNT=1 CATBOOST_TUNING_ENABLED=false TRAIN_MAX_ROWS=150000 EVAL_MONTH_SAMPLE_SIZE=40000 CATBOOST_FIT_EVAL_SIZE=20000 bash scripts/train_model.sh
+CATBOOST_THREAD_COUNT=1 CATBOOST_TUNING_ENABLED=false TRAIN_MAX_ROWS=150000 EVAL_MONTH_SAMPLE_SIZE=40000 CATBOOST_FIT_EVAL_SIZE=20000 bash scripts/train_model.sh
 ```
 
 
@@ -300,4 +320,3 @@ docker compose up --build
 
 - API: `http://localhost:8000`
 - Prometheus: `http://localhost:9090`
-
