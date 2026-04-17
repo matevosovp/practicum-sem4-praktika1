@@ -90,16 +90,20 @@
 Пайплайн включает:
 
 - chunked-разрезание исходного CSV на очищенные помесячные снапшоты;
-- построение фичей на месяце `t`;
+- построение только нужных modeling columns на месяце `t` и раннее отбрасывание неиспользуемых полей;
 - формирование multilabel-таргета на `t+1`;
 - time-based split;
 - downsampling негативных примеров на train без затрагивания validation/test;
 - ограничение полного train sample через cap `TRAIN_MAX_ROWS`, чтобы CatBoost не раздувался по памяти на редких продуктах;
-- CatBoost с нативной работой по категориальным признакам без ручного one-hot;
+- облегчённые dtypes в modeling parquet и column-pruned чтение под конкретную стадию;
+- memory-safe one-vs-rest CatBoost: продуктовые модели обучаются строго последовательно, сразу сохраняются в stage-директорию и выгружаются из памяти;
+- явный `del` и `gc.collect()` после каждой продуктовой модели и после каждой крупной stage-структуры;
+- CatBoost с нативной работой по категориальным признакам без ручного one-hot и с memory-aware ограничениями по CTR/threads;
 - фиксированный `eval_set` и `early_stopping` для всех CatBoost-стадий;
 - двухступенчатый tuning вместо тяжелого глобального поиска:
-  - Stage A: быстрый screening небольшого ручного набора конфигураций на последних train-месяцах и sampled validation;
+  - Stage A: быстрый screening компактного ручного набора memory-safe конфигураций на последних train-месяцах и sampled validation;
   - Stage B: подтверждение только top-N конфигураций на полном train sample;
+- feature importance только для осмысленных CatBoost-стадий, а не для каждого промежуточного run;
 - расчёт ranking-метрик и анализ ошибок.
 
 ### MLflow
@@ -109,8 +113,8 @@
 - параметры эксперимента;
 - ranking-метрики на validation и test;
 - одна главная scalar-метрика `val_map_at_3` для удобного сравнения runs;
-- модель и bundle-артефакты;
-- артефакты анализа ошибок и важности признаков для CatBoost-стадий;
+- bundle-артефакты и финальные stage summary;
+- артефакты анализа ошибок и важности признаков только для ключевых CatBoost-стадий;
 - отдельные MLflow runs для всех tuning-кандидатов из Stage A и Stage B;
 - leaderboard'ы `stage_04_stage_a_leaderboard.csv` и `stage_04_stage_b_leaderboard.csv` для tuned-стадии.
 
@@ -206,6 +210,17 @@ source .venv_rec_prod/bin/activate
 bash scripts/train_model.sh
 ```
 
+Ключевые memory-safe параметры:
+
+```bash
+CATBOOST_PROFILE=memory_safe
+CATBOOST_RAM_LIMIT=12gb
+CATBOOST_THREAD_COUNT=2
+TRAIN_MAX_ROWS=350000
+TUNING_STAGE_A_CANDIDATE_COUNT=4
+TUNING_STAGE_B_TOP_N=2
+```
+
 
 ## Как запустить EDA
 
@@ -222,13 +237,13 @@ python -m src.models.train
 Если нагрузку на машину, можно запускать так:
 
 ```bash
-CATBOOST_THREAD_COUNT=2 CATBOOST_TUNING_ENABLED=true TRAIN_MAX_ROWS=300000 TUNING_STAGE_A_MAX_ROWS=120000 bash scripts/train_model.sh
+CATBOOST_PROFILE=memory_safe CATBOOST_RAM_LIMIT=12gb CATBOOST_THREAD_COUNT=2 CATBOOST_TUNING_ENABLED=true TRAIN_MAX_ROWS=300000 TUNING_STAGE_A_MAX_ROWS=120000 TUNING_STAGE_A_CANDIDATE_COUNT=4 bash scripts/train_model.sh
 ```
 
 Если нужен только быстрый smoke-прогон без hyperparameter search:
 
 ```bash
-CATBOOST_THREAD_COUNT=2 CATBOOST_TUNING_ENABLED=false TRAIN_MAX_ROWS=150000 EVAL_MONTH_SAMPLE_SIZE=40000 bash scripts/train_model.sh
+CATBOOST_PROFILE=memory_safe CATBOOST_RAM_LIMIT=12gb CATBOOST_THREAD_COUNT=1 CATBOOST_TUNING_ENABLED=false TRAIN_MAX_ROWS=150000 EVAL_MONTH_SAMPLE_SIZE=40000 CATBOOST_FIT_EVAL_SIZE=20000 bash scripts/train_model.sh
 ```
 
 
@@ -290,12 +305,13 @@ docker compose up --build
 
 - `best_model.joblib` — основной bundle с лучшей CatBoost-стадией по validation `MAP@3`;
 - `stage_00_*.joblib ... stage_04_*.joblib` — отдельные артефакты каждой стадии;
+- `stage_*_models/` — каталоги с последовательными per-product CatBoost-моделями, которые сохраняются сразу после fit;
 - `product_mapping.json` — человекочитаемые названия продуктов;
 - `reference_stats.json` — база для простого drift-check в API;
 - `experiment_leaderboard.csv` — единая таблица сравнения baseline / CatBoost / tuned CatBoost;
 - `split_summary.csv` — помесячная сводка train / validation / test для ноутбука и ревью;
 - `feature_list.json` / `categorical_features.json` — зафиксированный список признаков для продового CatBoost bundle;
-- `stage_*_feature_importance.csv` — топ важностей признаков для CatBoost-стадий;
+- `stage_03_*_feature_importance.csv`, `stage_04_*_feature_importance.csv` — топ важностей признаков только для ключевых CatBoost-стадий;
 - `stage_*_validation_errors.csv` / `stage_*_test_errors.csv` — примеры промахов для CatBoost-стадий;
 - `stage_04_stage_a_leaderboard.csv` — результаты быстрого screening-а конфигураций;
 - `stage_04_stage_b_leaderboard.csv` — результаты финального подтверждения top-N конфигураций;
@@ -307,7 +323,7 @@ docker compose up --build
 
 1. Появился новый месячный снапшот.
 2. Пайплайн пересобирает `t -> t+1` выборки.
-3. Переобучается модель со скользящим историческим окном.
+3. Переобучается модель со скользящим историческим окном в последовательном memory-safe режиме.
 4. Обновляются MLflow-эксперименты, leaderboard'ы тюнинга, `reference_stats.json` и alias `champion` в Model Registry.
 5. После smoke-check выкатывается новый `best_model.joblib`.
 

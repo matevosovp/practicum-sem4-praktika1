@@ -49,6 +49,52 @@ def clean_raw_chunk(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def optimize_modeling_frame_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Downcast modeling columns to keep parquet files and fit frames compact."""
+
+    optimized = df.copy()
+
+    float32_columns = {
+        "customer_since_months",
+        "age",
+        "ind_nuevo",
+        "antiguedad",
+        "indrel",
+        "tipodom",
+        "cod_prov",
+        "ind_actividad_cliente",
+        "renta",
+    }
+    int8_columns = {
+        "month_number",
+        "prev_products_total",
+        "products_total",
+        "products_added_prev_month",
+        "products_dropped_prev_month",
+        "has_any_new_product",
+        "target_count",
+        *PRODUCT_COLUMNS,
+        *[f"target__{column}" for column in PRODUCT_COLUMNS],
+    }
+
+    if "ncodpers" in optimized.columns:
+        optimized["ncodpers"] = pd.to_numeric(optimized["ncodpers"], errors="coerce").astype("int32")
+
+    for column in float32_columns:
+        if column in optimized.columns:
+            optimized[column] = pd.to_numeric(optimized[column], errors="coerce").astype("float32")
+
+    for column in int8_columns:
+        if column in optimized.columns:
+            optimized[column] = pd.to_numeric(optimized[column], errors="coerce").fillna(0).astype("int8")
+
+    for column in CATEGORICAL_COLUMNS:
+        if column in optimized.columns:
+            optimized[column] = optimized[column].fillna("UNKNOWN").astype("string")
+
+    return optimized
+
+
 def read_clean_csv(path: str | pd.io.common.FilePath, **kwargs: object) -> pd.DataFrame:
     """Read a prepared monthly CSV with consistent parsing."""
 

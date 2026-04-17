@@ -2,12 +2,17 @@
   "strategy": "two_stage_manual_screening",
   "primary_metric_name": "val_map_at_3",
   "stage_a_train_months": [
-    "2015-10-28"
+    "2015-08-28",
+    "2015-09-28",
+    "2015-10-28",
+    "2015-11-28"
   ],
-  "stage_a_candidate_count": 5,
-  "stage_b_top_n": 1,
-  "stage_a_sample_rows": 10000,
-  "stage_a_eval_rows": 2000,
-  "stage_b_eval_rows": 3000,
-  "best_candidate_metric": 0.5861666666666676
+  "stage_a_candidate_count": 4,
+  "stage_b_top_n": 2,
+  "stage_a_sample_rows": 180000,
+  "stage_a_eval_rows": 120000,
+  "stage_b_eval_rows": 360000,
+  "best_candidate_metric": 0.6640549230619587,
+  "catboost_profile": "memory_safe",
+  "catboost_ram_limit": "12gb"
 }

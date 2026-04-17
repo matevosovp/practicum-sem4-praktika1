@@ -46,7 +46,8 @@ class ProjectConfig:
     train_max_rows: int = int(_env("TRAIN_MAX_ROWS", "350000"))
     eval_month_sample_size: int = int(_env("EVAL_MONTH_SAMPLE_SIZE", "120000"))
     top_k: int = int(_env("TOP_K", "3"))
-    catboost_thread_count: int = int(_env("CATBOOST_THREAD_COUNT", "4"))
+    catboost_profile: str = _env("CATBOOST_PROFILE", "memory_safe")
+    catboost_thread_count: int = int(_env("CATBOOST_THREAD_COUNT", "2"))
     catboost_tuning_enabled: bool = _env("CATBOOST_TUNING_ENABLED", "true").lower() == "true"
     catboost_early_stopping_rounds: int = int(_env("CATBOOST_EARLY_STOPPING_ROUNDS", "40"))
     catboost_fit_eval_size: int = int(_env("CATBOOST_FIT_EVAL_SIZE", "40000"))
@@ -55,6 +56,9 @@ class ProjectConfig:
     tuning_stage_a_max_rows: int = int(_env("TUNING_STAGE_A_MAX_ROWS", "180000"))
     tuning_stage_a_eval_size: int = int(_env("TUNING_STAGE_A_EVAL_SIZE", "40000"))
     tuning_stage_b_top_n: int = int(_env("TUNING_STAGE_B_TOP_N", "2"))
+    tuning_stage_a_candidate_count: int = int(_env("TUNING_STAGE_A_CANDIDATE_COUNT", "4"))
+    feature_importance_top_n: int = int(_env("FEATURE_IMPORTANCE_TOP_N", "20"))
+    api_preload_product_models: bool = _env("API_PRELOAD_PRODUCT_MODELS", "true").lower() == "true"
     monthly_dir_name: str = "monthly"
     modeling_dir_name: str = "modeling"
     feature_columns: tuple[str, ...] = field(

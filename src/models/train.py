@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,8 +42,14 @@ BASIC_NUMERIC_FEATURES = [*NUMERIC_COLUMNS, *PRODUCT_COLUMNS]
 BASIC_CATEGORICAL_FEATURES = [*CATEGORICAL_COLUMNS]
 FE_NUMERIC_FEATURES = [*ENGINEERED_NUMERIC_FEATURES, *NUMERIC_COLUMNS, *PRODUCT_COLUMNS]
 FE_CATEGORICAL_FEATURES = [*CATEGORICAL_COLUMNS]
+MODELING_CONTEXT_COLUMNS = ["fecha_dato", "target_month", "ncodpers", "segmento", "products_total", "target_count"]
 
 logger = get_logger(__name__)
+CATBOOST_STAGE_PRIORITY = {
+    "stage_02_catboost_basic": 2,
+    "stage_03_catboost_feature_engineering": 3,
+    "stage_04_catboost_tuned": 4,
+}
 
 
 @dataclass(slots=True)
@@ -73,6 +80,53 @@ def primary_metric_key(config: ProjectConfig) -> str:
 
 def primary_metric_value(config: ProjectConfig, metrics: dict[str, float]) -> float:
     return float(metrics[primary_metric_key(config)])
+
+
+def unique_columns(*column_groups: list[str] | tuple[str, ...]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for group in column_groups:
+        for column in group:
+            if column not in seen:
+                ordered.append(column)
+                seen.add(column)
+    return ordered
+
+
+def target_columns() -> list[str]:
+    return [f"target__{column}" for column in PRODUCT_COLUMNS]
+
+
+def training_columns(feature_columns: list[str]) -> list[str]:
+    return unique_columns(feature_columns, target_columns(), ["target_count"])
+
+
+def evaluation_columns(feature_columns: list[str]) -> list[str]:
+    return unique_columns(MODELING_CONTEXT_COLUMNS, PRODUCT_COLUMNS, feature_columns, target_columns())
+
+
+def stage_model_dir(config: ProjectConfig, stage_name: str) -> Path:
+    return config.models_dir / f"{stage_name}_models"
+
+
+def reset_stage_model_dir(path: Path) -> Path:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def remove_stage_model_dir(path: Path | None) -> None:
+    if path is not None and path.exists():
+        shutil.rmtree(path)
+
+
+def rename_stage_model_dir(source: Path, target: Path) -> Path:
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target))
+    return target
 
 
 def sample_evaluation_month(df: pd.DataFrame, sample_size: int, seed: int) -> pd.DataFrame:
@@ -127,17 +181,21 @@ def cap_training_rows(df: pd.DataFrame, max_rows: int, random_state: int) -> pd.
 def load_sampled_training_frame(
     config: ProjectConfig,
     *,
+    feature_columns: list[str],
     months: tuple[str, ...] | None = None,
     negative_ratio: float | None = None,
     max_rows: int | None = None,
 ) -> pd.DataFrame:
     selected_months = months or config.train_months
     selected_negative_ratio = config.negative_sample_ratio if negative_ratio is None else negative_ratio
+    required_columns = training_columns(feature_columns)
 
     frames = []
     for offset, month in enumerate(selected_months):
-        monthly_df = load_modeling_month(config, month)
+        monthly_df = load_modeling_month(config, month, columns=required_columns)
         frames.append(sample_training_rows(monthly_df, selected_negative_ratio, config.random_state + offset))
+        del monthly_df
+        gc.collect()
 
     train_df = pd.concat(frames, ignore_index=True)
     if max_rows is not None:
@@ -151,9 +209,6 @@ def load_sampled_training_frame(
                 max_rows,
             )
 
-    for column in CATEGORICAL_COLUMNS:
-        if column in train_df.columns:
-            train_df[column] = train_df[column].fillna("UNKNOWN").astype(str)
     return train_df.reset_index(drop=True)
 
 
@@ -161,17 +216,16 @@ def load_sampled_evaluation_frames(
     config: ProjectConfig,
     months: tuple[str, ...],
     *,
+    feature_columns: list[str],
     sample_size: int,
     seed: int,
 ) -> list[tuple[str, pd.DataFrame]]:
     monthly_frames: list[tuple[str, pd.DataFrame]] = []
+    required_columns = evaluation_columns(feature_columns)
 
     for offset, month in enumerate(months):
-        monthly_df = load_modeling_month(config, month)
+        monthly_df = load_modeling_month(config, month, columns=required_columns)
         monthly_df = sample_evaluation_month(monthly_df, sample_size=sample_size, seed=seed + offset)
-        for column in CATEGORICAL_COLUMNS:
-            if column in monthly_df.columns:
-                monthly_df[column] = monthly_df[column].fillna("UNKNOWN").astype(str)
         monthly_frames.append((month, monthly_df.reset_index(drop=True)))
 
     return monthly_frames
@@ -183,18 +237,22 @@ def concat_sampled_frames(monthly_frames: list[tuple[str, pd.DataFrame]]) -> pd.
 
 def fit_global_baseline(config: ProjectConfig) -> GlobalPopularityRecommender:
     columns = ["target_count", *[f"target__{column}" for column in PRODUCT_COLUMNS]]
-    monthly_frames = [load_modeling_month(config, month)[columns] for month in config.train_months]
-    return GlobalPopularityRecommender().fit(pd.concat(monthly_frames, ignore_index=True))
+    monthly_frames = [load_modeling_month(config, month, columns=columns) for month in config.train_months]
+    model = GlobalPopularityRecommender().fit(pd.concat(monthly_frames, ignore_index=True))
+    release_memory(*monthly_frames)
+    return model
 
 
 def fit_segment_baseline(config: ProjectConfig) -> SegmentPopularityRecommender:
     columns = ["segmento", *[f"target__{column}" for column in PRODUCT_COLUMNS]]
-    monthly_frames = [load_modeling_month(config, month)[columns] for month in config.train_months]
-    return SegmentPopularityRecommender().fit(pd.concat(monthly_frames, ignore_index=True))
+    monthly_frames = [load_modeling_month(config, month, columns=columns) for month in config.train_months]
+    model = SegmentPopularityRecommender().fit(pd.concat(monthly_frames, ignore_index=True))
+    release_memory(*monthly_frames)
+    return model
 
 
-def build_reference_stats(config: ProjectConfig) -> dict[str, Any]:
-    train_sample = load_sampled_training_frame(config, max_rows=config.train_max_rows)
+def build_reference_stats(config: ProjectConfig, feature_columns: list[str]) -> dict[str, Any]:
+    train_sample = load_sampled_training_frame(config, feature_columns=feature_columns, max_rows=config.train_max_rows)
     reference_stats: dict[str, Any] = {"numeric": {}, "categorical": {}}
 
     for column in FE_NUMERIC_FEATURES:
@@ -210,6 +268,7 @@ def build_reference_stats(config: ProjectConfig) -> dict[str, Any]:
         top_values = train_sample[column].fillna("UNKNOWN").astype(str).value_counts(normalize=True).head(10)
         reference_stats["categorical"][column] = top_values.to_dict()
 
+    release_memory(train_sample)
     return reference_stats
 
 
@@ -219,12 +278,14 @@ def build_catboost_model(
     categorical_feature_columns: list[str],
     params: dict[str, Any],
     random_state: int,
+    model_artifact_dir: Path | None,
 ) -> MultiProductCatBoostRecommender:
     return MultiProductCatBoostRecommender(
         feature_columns=feature_columns,
         categorical_feature_columns=categorical_feature_columns,
         model_params=params,
         random_state=random_state,
+        model_artifact_dir=model_artifact_dir,
     )
 
 
@@ -249,19 +310,21 @@ def evaluate_model_on_frames(
     error_frames = []
 
     for month, monthly_df in monthly_frames:
-        scores = predict_scores(model_like, monthly_df, feature_columns)
+        scores = predict_scores(model_like, monthly_df, feature_columns).astype("float32", copy=False)
         metrics = evaluate_rankings(
             y_true=monthly_df[list(config.target_columns)].to_numpy(),
-            scores=np.asarray(scores, dtype=float),
+            scores=scores,
             current_products=monthly_df[PRODUCT_COLUMNS].to_numpy(),
             k=config.top_k,
         )
         metrics["snapshot_month"] = month
         metrics_rows.append(metrics)
-        error_frame = build_error_analysis_frame(monthly_df, np.asarray(scores, dtype=float), k=config.top_k)
+        error_frame = build_error_analysis_frame(monthly_df, scores, k=config.top_k)
         error_frame["split_name"] = split_name
         error_frame["snapshot_month"] = month
         error_frames.append(error_frame)
+        del scores
+        gc.collect()
 
     metrics_df = pd.DataFrame(metrics_rows)
     aggregated_metrics = {key: float(metrics_df[key].mean()) for key in metrics_df.columns if key != "snapshot_month"}
@@ -282,6 +345,7 @@ def evaluate_model_on_months(
     monthly_frames = load_sampled_evaluation_frames(
         config,
         months,
+        feature_columns=feature_columns,
         sample_size=sample_size_override or config.eval_month_sample_size,
         seed=config.random_state + seed_offset,
     )
@@ -311,8 +375,6 @@ def format_seconds(seconds: float) -> str:
 
 
 def release_memory(*objects: Any) -> None:
-    for obj in objects:
-        del obj
     gc.collect()
 
 
@@ -339,7 +401,7 @@ def build_split_summary_frame(config: ProjectConfig) -> pd.DataFrame:
 
     for split_name, months in split_map.items():
         for month in months:
-            monthly_df = load_modeling_month(config, month)
+            monthly_df = load_modeling_month(config, month, columns=["ncodpers", "target_count"])
             rows.append(
                 {
                     "split": split_name,
@@ -351,6 +413,8 @@ def build_split_summary_frame(config: ProjectConfig) -> pd.DataFrame:
                     "positive_rate": float((monthly_df["target_count"] > 0).mean()),
                 }
             )
+            del monthly_df
+            gc.collect()
 
     return pd.DataFrame(rows)
 
@@ -395,6 +459,7 @@ def save_stage_bundle(
     notes: str,
 ) -> Path:
     bundle_path = config.models_dir / f"{stage_name}.joblib"
+    model_storage_dir = model.model_artifact_dir if hasattr(model, "model_artifact_dir") else None
     bundle = {
         "model": model,
         "bundle_type": model_name,
@@ -410,6 +475,7 @@ def save_stage_bundle(
         "test_metrics": test_metrics,
         "primary_metric_name": config.primary_metric_name,
         "notes": notes,
+        "model_storage_dir": str(model_storage_dir) if model_storage_dir is not None else None,
     }
     save_bundle(bundle, bundle_path)
     return bundle_path
@@ -476,6 +542,7 @@ def log_catboost_run(
     params: dict[str, Any],
     notes: str,
     extra_artifacts: dict[str, Path] | None = None,
+    compute_feature_importance: bool = False,
 ) -> ExperimentResult:
     bundle_path = save_stage_bundle(
         config,
@@ -491,13 +558,11 @@ def log_catboost_run(
         notes=notes,
     )
 
-    feature_importance_path = config.models_dir / f"{stage_name}_feature_importance.csv"
     valid_errors_path = config.models_dir / f"{stage_name}_validation_errors.csv"
     test_errors_path = config.models_dir / f"{stage_name}_test_errors.csv"
     feature_list_path = config.models_dir / f"{stage_name}_feature_list.json"
     categorical_features_path = config.models_dir / f"{stage_name}_categorical_features.json"
 
-    model.get_feature_importance_frame().to_csv(feature_importance_path, index=False)
     valid_errors.to_csv(valid_errors_path, index=False)
     test_errors.to_csv(test_errors_path, index=False)
     feature_list_path.write_text(json.dumps(feature_columns, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -505,12 +570,15 @@ def log_catboost_run(
 
     artifact_paths: dict[str, Path] = {
         "bundle_path": bundle_path,
-        "feature_importance_path": feature_importance_path,
         "validation_errors_path": valid_errors_path,
         "test_errors_path": test_errors_path,
         "feature_list_path": feature_list_path,
         "categorical_features_path": categorical_features_path,
     }
+    if compute_feature_importance:
+        feature_importance_path = config.models_dir / f"{stage_name}_feature_importance.csv"
+        model.get_feature_importance_frame(top_n=config.feature_importance_top_n).to_csv(feature_importance_path, index=False)
+        artifact_paths["feature_importance_path"] = feature_importance_path
     if extra_artifacts:
         artifact_paths.update(extra_artifacts)
 
@@ -528,6 +596,9 @@ def log_catboost_run(
                 "eval_month_sample_size": config.eval_month_sample_size,
                 "fit_eval_size": config.catboost_fit_eval_size,
                 "early_stopping_rounds": config.catboost_early_stopping_rounds,
+                "catboost_profile": config.catboost_profile,
+                "catboost_ram_limit": config.catboost_ram_limit,
+                "thread_count": config.catboost_thread_count,
                 "num_features": len(feature_columns),
                 "num_categorical_features": len(categorical_feature_columns),
                 "num_train_rows": sum(info.train_rows for info in model.model_info_.values()),
@@ -559,54 +630,59 @@ def log_catboost_run(
 def build_tuning_candidate_grid() -> list[dict[str, Any]]:
     return [
         {
-            "iterations": 160,
+            "iterations": 150,
             "depth": 5,
-            "learning_rate": 0.08,
+            "learning_rate": 0.07,
             "l2_leaf_reg": 4.0,
-            "min_data_in_leaf": 48,
-            "random_strength": 0.5,
+            "min_data_in_leaf": 64,
+            "random_strength": 0.4,
+            "rsm": 0.85,
             "bootstrap_type": "Bayesian",
             "bagging_temperature": 0.0,
         },
         {
-            "iterations": 200,
+            "iterations": 180,
             "depth": 6,
             "learning_rate": 0.06,
             "l2_leaf_reg": 5.0,
-            "min_data_in_leaf": 32,
-            "random_strength": 1.0,
-            "bootstrap_type": "Bayesian",
-            "bagging_temperature": 0.5,
-        },
-        {
-            "iterations": 240,
-            "depth": 6,
-            "learning_rate": 0.05,
-            "l2_leaf_reg": 6.0,
             "min_data_in_leaf": 48,
-            "random_strength": 1.2,
+            "random_strength": 0.8,
+            "rsm": 0.8,
             "bootstrap_type": "Bayesian",
-            "bagging_temperature": 1.0,
+            "bagging_temperature": 0.3,
         },
         {
             "iterations": 220,
-            "depth": 7,
+            "depth": 6,
             "learning_rate": 0.05,
-            "l2_leaf_reg": 5.0,
-            "min_data_in_leaf": 32,
-            "random_strength": 1.5,
+            "l2_leaf_reg": 6.0,
+            "min_data_in_leaf": 64,
+            "random_strength": 1.0,
+            "rsm": 0.75,
             "bootstrap_type": "Bernoulli",
             "subsample": 0.8,
         },
         {
-            "iterations": 150,
-            "depth": 6,
+            "iterations": 140,
+            "depth": 5,
             "learning_rate": 0.09,
             "l2_leaf_reg": 7.0,
-            "min_data_in_leaf": 64,
-            "random_strength": 0.7,
+            "min_data_in_leaf": 80,
+            "random_strength": 0.6,
+            "rsm": 0.9,
             "bootstrap_type": "Bayesian",
-            "bagging_temperature": 0.2,
+            "bagging_temperature": 0.1,
+        },
+        {
+            "iterations": 200,
+            "depth": 6,
+            "learning_rate": 0.05,
+            "l2_leaf_reg": 8.0,
+            "min_data_in_leaf": 72,
+            "random_strength": 1.2,
+            "rsm": 0.7,
+            "bootstrap_type": "Bernoulli",
+            "subsample": 0.75,
         },
     ]
 
@@ -618,6 +694,11 @@ def tuning_common_params(config: ProjectConfig) -> dict[str, Any]:
         "auto_class_weights": "Balanced",
         "thread_count": config.catboost_thread_count,
         "used_ram_limit": config.catboost_ram_limit,
+        "boosting_type": "Plain",
+        "one_hot_max_size": 10,
+        "max_ctr_complexity": 1,
+        "ctr_leaf_count_limit": 32,
+        "border_count": 64,
     }
 
 
@@ -688,6 +769,9 @@ def log_tuning_candidate_run(
                 "eval_rows": eval_rows,
                 "fit_eval_size": config.catboost_fit_eval_size,
                 "early_stopping_rounds": config.catboost_early_stopping_rounds,
+                "catboost_profile": config.catboost_profile,
+                "catboost_ram_limit": config.catboost_ram_limit,
+                "thread_count": config.catboost_thread_count,
                 "notes": notes,
                 **({"screening_rank": screening_rank} if screening_rank is not None else {}),
                 **params,
@@ -707,7 +791,9 @@ def run_two_stage_tuning(
     categorical_feature_columns: list[str],
 ) -> tuple[MultiProductCatBoostRecommender, dict[str, Any], SplitMetrics, pd.DataFrame, dict[str, Path]]:
     common_params = tuning_common_params(config)
-    stage_a_candidates = build_tuning_candidate_grid()
+    stage_a_candidates = build_tuning_candidate_grid()[: config.tuning_stage_a_candidate_count]
+    tuning_root = config.models_dir / "tuning_candidates"
+    tuning_root.mkdir(parents=True, exist_ok=True)
 
     logger.info(
         "Stage A tuning | months=%s | max_rows=%s | candidate_count=%s",
@@ -717,12 +803,14 @@ def run_two_stage_tuning(
     )
     stage_a_train_df = load_sampled_training_frame(
         config,
+        feature_columns=feature_columns,
         months=config.tuning_stage_a_months,
         max_rows=config.tuning_stage_a_max_rows,
     )
     stage_a_eval_frames = load_sampled_evaluation_frames(
         config,
         config.valid_months,
+        feature_columns=feature_columns,
         sample_size=config.tuning_stage_a_eval_size,
         seed=config.random_state + 2_000,
     )
@@ -735,12 +823,14 @@ def run_two_stage_tuning(
         candidate_name = f"stage_04a_candidate_{candidate_idx:02d}"
         candidate_params = {**common_params, **candidate}
         logger.info("Stage A candidate %s/%s | %s", candidate_idx, len(stage_a_candidates), json.dumps(candidate, ensure_ascii=False))
+        candidate_dir = reset_stage_model_dir(tuning_root / candidate_name)
 
         model = build_catboost_model(
             feature_columns=feature_columns,
             categorical_feature_columns=categorical_feature_columns,
             params=candidate_params,
             random_state=config.random_state,
+            model_artifact_dir=candidate_dir,
         )
         fit_started_at = time.perf_counter()
         model.fit(
@@ -776,7 +866,9 @@ def run_two_stage_tuning(
                 run_id=run_id,
             )
         )
-        release_memory(model, valid_metrics)
+        remove_stage_model_dir(candidate_dir)
+        del model, valid_metrics
+        gc.collect()
 
     stage_a_df = pd.DataFrame(stage_a_results).sort_values(metric_column, ascending=False).reset_index(drop=True)
     stage_a_df["screening_rank"] = np.arange(1, len(stage_a_df) + 1)
@@ -790,6 +882,7 @@ def run_two_stage_tuning(
     stage_b_eval_frames = load_sampled_evaluation_frames(
         config,
         config.valid_months,
+        feature_columns=feature_columns,
         sample_size=config.eval_month_sample_size,
         seed=config.random_state + 3_000,
     )
@@ -800,6 +893,7 @@ def run_two_stage_tuning(
     best_params: dict[str, Any] | None = None
     best_valid_metrics: SplitMetrics | None = None
     best_valid_errors: pd.DataFrame | None = None
+    best_model_dir: Path | None = None
     best_metric = float("-inf")
 
     for _, stage_a_row in top_stage_a.iterrows():
@@ -811,12 +905,14 @@ def run_two_stage_tuning(
             stage_a_row["candidate_name"],
             int(stage_a_row["screening_rank"]),
         )
+        candidate_dir = reset_stage_model_dir(tuning_root / candidate_name)
 
         model = build_catboost_model(
             feature_columns=feature_columns,
             categorical_feature_columns=categorical_feature_columns,
             params=candidate_params,
             random_state=config.random_state,
+            model_artifact_dir=candidate_dir,
         )
         fit_started_at = time.perf_counter()
         model.fit(
@@ -858,14 +954,19 @@ def run_two_stage_tuning(
         candidate_metric = primary_metric_value(config, valid_metrics.metrics)
         if candidate_metric > best_metric:
             if best_model is not None and best_valid_metrics is not None and best_valid_errors is not None:
-                release_memory(best_model, best_valid_metrics, best_valid_errors)
+                remove_stage_model_dir(best_model_dir)
+                del best_model, best_valid_metrics, best_valid_errors
+                gc.collect()
             best_metric = candidate_metric
             best_model = model
             best_params = candidate_params
             best_valid_metrics = valid_metrics
             best_valid_errors = valid_errors
+            best_model_dir = candidate_dir
         else:
-            release_memory(model, valid_metrics, valid_errors)
+            remove_stage_model_dir(candidate_dir)
+            del model, valid_metrics, valid_errors
+            gc.collect()
 
     stage_a_path = config.models_dir / "stage_04_stage_a_leaderboard.csv"
     stage_b_path = config.models_dir / "stage_04_stage_b_leaderboard.csv"
@@ -884,6 +985,8 @@ def run_two_stage_tuning(
                 "stage_a_eval_rows": int(len(stage_a_eval_df)),
                 "stage_b_eval_rows": int(len(stage_b_eval_df)),
                 "best_candidate_metric": float(best_metric),
+                "catboost_profile": config.catboost_profile,
+                "catboost_ram_limit": config.catboost_ram_limit,
             },
             ensure_ascii=False,
             indent=2,
@@ -891,10 +994,11 @@ def run_two_stage_tuning(
         encoding="utf-8",
     )
 
-    if best_model is None or best_params is None or best_valid_metrics is None or best_valid_errors is None:
+    if best_model is None or best_params is None or best_valid_metrics is None or best_valid_errors is None or best_model_dir is None:
         raise RuntimeError("Two-stage tuning did not produce a final CatBoost candidate")
 
-    release_memory(stage_a_train_df, stage_a_eval_df, stage_b_eval_df, stage_a_df, top_stage_a)
+    del stage_a_train_df, stage_a_eval_df, stage_b_eval_df, stage_a_df, top_stage_a, stage_a_eval_frames, stage_b_eval_frames
+    gc.collect()
     return (
         best_model,
         best_params,
@@ -922,6 +1026,9 @@ def register_best_model(
     client = MlflowClient(tracking_uri=config.mlflow_tracking_uri)
     bundle_path = result.artifacts["bundle_path"]
     bundle = joblib.load(bundle_path)
+    model_storage_dir = bundle.get("model_storage_dir")
+    if model_storage_dir is None:
+        raise RuntimeError("Bundle is missing model_storage_dir for registry packaging")
     output_example = pd.DataFrame(bundle["model"].predict_scores(input_example), columns=PRODUCT_COLUMNS)
     signature = infer_signature(input_example, output_example)
 
@@ -930,7 +1037,10 @@ def register_best_model(
         mlflow.pyfunc.log_model(
             artifact_path="model",
             python_model=RegisteredBundlePyFuncModel(),
-            artifacts={"bundle_path": str(bundle_path)},
+            artifacts={
+                "bundle_path": str(bundle_path),
+                "model_storage_dir": str(model_storage_dir),
+            },
             input_example=input_example,
             signature=signature,
         )
@@ -998,19 +1108,11 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
         config.negative_sample_ratio,
         config.eval_month_sample_size,
     )
-    train_df = load_sampled_training_frame(config, max_rows=config.train_max_rows)
-    reference_stats = build_reference_stats(config)
+    basic_feature_columns = [*BASIC_NUMERIC_FEATURES, *BASIC_CATEGORICAL_FEATURES]
+    fe_feature_columns = [*FE_NUMERIC_FEATURES, *FE_CATEGORICAL_FEATURES]
+    reference_stats = build_reference_stats(config, fe_feature_columns)
     support_artifacts = save_supporting_artifacts(config, reference_stats)
-    fit_eval_frames = load_sampled_evaluation_frames(
-        config,
-        config.valid_months,
-        sample_size=config.catboost_fit_eval_size,
-        seed=config.random_state + 1_000,
-    )
-    fit_eval_df = concat_sampled_frames(fit_eval_frames)
-
     experiment_results: list[ExperimentResult] = []
-    logger.info("Training frame ready | rows=%s | columns=%s", len(train_df), len(train_df.columns))
 
     total_stages = 5
 
@@ -1047,7 +1149,8 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
         )
     )
     log_stage(1, "stage_00_global_popularity", f"done | {config.primary_metric_name}={primary_metric_value(config, global_valid_metrics.metrics):.5f}")
-    release_memory(global_baseline)
+    del global_baseline, global_valid_metrics, global_test_metrics
+    gc.collect()
 
     log_stage(2, "stage_01_segment_popularity", "fitting baseline")
     segment_baseline = fit_segment_baseline(config)
@@ -1078,31 +1181,45 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
         )
     )
     log_stage(2, "stage_01_segment_popularity", f"done | {config.primary_metric_name}={primary_metric_value(config, segment_valid_metrics.metrics):.5f}")
-    release_memory(segment_baseline)
+    del segment_baseline, segment_valid_metrics, segment_test_metrics
+    gc.collect()
 
-    basic_feature_columns = [*BASIC_NUMERIC_FEATURES, *BASIC_CATEGORICAL_FEATURES]
     basic_params = {
-        "iterations": 160,
-        "depth": 6,
+        "iterations": 150,
+        "depth": 5,
         "learning_rate": 0.07,
-        "l2_leaf_reg": 4.0,
-        "min_data_in_leaf": 48,
-        "random_strength": 1.0,
+        "l2_leaf_reg": 5.0,
+        "min_data_in_leaf": 64,
+        "random_strength": 0.8,
+        "rsm": 0.85,
         "bootstrap_type": "Bayesian",
-        "bagging_temperature": 0.5,
+        "bagging_temperature": 0.2,
         **tuning_common_params(config),
     }
+    basic_train_df = load_sampled_training_frame(config, feature_columns=basic_feature_columns, max_rows=config.train_max_rows)
+    basic_fit_eval_frames = load_sampled_evaluation_frames(
+        config,
+        config.valid_months,
+        feature_columns=basic_feature_columns,
+        sample_size=config.catboost_fit_eval_size,
+        seed=config.random_state + 1_000,
+    )
+    basic_fit_eval_df = concat_sampled_frames(basic_fit_eval_frames)
+    del basic_fit_eval_frames
+    gc.collect()
+    logger.info("Stage 02 training frame ready | rows=%s | columns=%s", len(basic_train_df), len(basic_train_df.columns))
     log_stage(3, "stage_02_catboost_basic", f"training CatBoost with {len(basic_feature_columns)} features")
     basic_model = build_catboost_model(
         feature_columns=basic_feature_columns,
         categorical_feature_columns=BASIC_CATEGORICAL_FEATURES,
         params=basic_params,
         random_state=config.random_state,
+        model_artifact_dir=reset_stage_model_dir(stage_model_dir(config, "stage_02_catboost_basic")),
     )
     basic_model.fit(
-        train_df,
+        basic_train_df,
         list(config.target_columns),
-        eval_df=fit_eval_df,
+        eval_df=basic_fit_eval_df,
         early_stopping_rounds=config.catboost_early_stopping_rounds,
     )
     basic_valid_metrics, basic_valid_errors = evaluate_model_on_months(config, basic_model, basic_feature_columns, config.valid_months, "valid")
@@ -1122,34 +1239,49 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
             reference_stats=reference_stats,
             params=basic_params,
             notes="CatBoost on raw profile and current products with a fixed validation eval_set and early stopping.",
+            compute_feature_importance=False,
         )
     )
     log_stage(3, "stage_02_catboost_basic", f"done | {config.primary_metric_name}={primary_metric_value(config, basic_valid_metrics.metrics):.5f}")
-    release_memory(basic_model, basic_valid_errors, basic_test_errors)
+    del basic_model, basic_valid_metrics, basic_valid_errors, basic_test_metrics, basic_test_errors, basic_fit_eval_df, basic_train_df
+    gc.collect()
 
-    fe_feature_columns = [*FE_NUMERIC_FEATURES, *FE_CATEGORICAL_FEATURES]
     fe_params = {
-        "iterations": 260,
+        "iterations": 210,
         "depth": 6,
         "learning_rate": 0.05,
-        "l2_leaf_reg": 5.0,
-        "min_data_in_leaf": 32,
-        "random_strength": 1.0,
-        "bootstrap_type": "Bayesian",
-        "bagging_temperature": 0.5,
+        "l2_leaf_reg": 6.0,
+        "min_data_in_leaf": 64,
+        "random_strength": 0.9,
+        "rsm": 0.8,
+        "bootstrap_type": "Bernoulli",
+        "subsample": 0.8,
         **tuning_common_params(config),
     }
+    fe_train_df = load_sampled_training_frame(config, feature_columns=fe_feature_columns, max_rows=config.train_max_rows)
+    fe_fit_eval_frames = load_sampled_evaluation_frames(
+        config,
+        config.valid_months,
+        feature_columns=fe_feature_columns,
+        sample_size=config.catboost_fit_eval_size,
+        seed=config.random_state + 1_100,
+    )
+    fe_fit_eval_df = concat_sampled_frames(fe_fit_eval_frames)
+    del fe_fit_eval_frames
+    gc.collect()
+    logger.info("Stage 03/04 training frame ready | rows=%s | columns=%s", len(fe_train_df), len(fe_train_df.columns))
     log_stage(4, "stage_03_catboost_feature_engineering", f"training CatBoost with {len(fe_feature_columns)} features")
     fe_model = build_catboost_model(
         feature_columns=fe_feature_columns,
         categorical_feature_columns=FE_CATEGORICAL_FEATURES,
         params=fe_params,
         random_state=config.random_state,
+        model_artifact_dir=reset_stage_model_dir(stage_model_dir(config, "stage_03_catboost_feature_engineering")),
     )
     fe_model.fit(
-        train_df,
+        fe_train_df,
         list(config.target_columns),
-        eval_df=fit_eval_df,
+        eval_df=fe_fit_eval_df,
         early_stopping_rounds=config.catboost_early_stopping_rounds,
     )
     fe_valid_metrics, fe_valid_errors = evaluate_model_on_months(config, fe_model, fe_feature_columns, config.valid_months, "valid")
@@ -1169,28 +1301,32 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
             reference_stats=reference_stats,
             params=fe_params,
             notes="CatBoost after temporal and portfolio-delta feature engineering, still using time-based eval_set and early stopping.",
+            compute_feature_importance=True,
         )
     )
     log_stage(4, "stage_03_catboost_feature_engineering", f"done | {config.primary_metric_name}={primary_metric_value(config, fe_valid_metrics.metrics):.5f}")
-    release_memory(fe_model, fe_valid_errors, fe_test_errors)
+    del fe_model, fe_valid_metrics, fe_valid_errors, fe_test_metrics, fe_test_errors
+    gc.collect()
 
     log_stage(5, "stage_04_catboost_tuned", "running two-stage hyperparameter selection")
     if config.catboost_tuning_enabled:
         tuned_model, tuned_params, tuned_valid_metrics, tuned_valid_errors, tuning_artifacts = run_two_stage_tuning(
             config,
-            full_train_df=train_df,
+            full_train_df=fe_train_df,
             feature_columns=fe_feature_columns,
             categorical_feature_columns=FE_CATEGORICAL_FEATURES,
         )
+        final_tuned_dir = rename_stage_model_dir(Path(tuned_model.model_artifact_dir), stage_model_dir(config, "stage_04_catboost_tuned"))
+        tuned_model.rebase_artifact_dir(final_tuned_dir)
         tuned_notes = (
-            "Two-stage CatBoost tuning: Stage A screens a small manual candidate set on recent train months, "
-            "Stage B confirms top candidates on the full train sample. All candidates are logged to MLflow and "
+            "Two-stage CatBoost tuning: Stage A screens a compact manual candidate set on recent train months, "
+            "Stage B confirms only the top-N candidates on the full train sample. All candidates are logged to MLflow and "
             f"the final choice is made by {config.primary_metric_name}."
         )
         tuned_result_params = {
             **tuned_params,
             "tuning_strategy": "two_stage_manual_screening",
-            "tuning_stage_a_candidate_count": len(build_tuning_candidate_grid()),
+            "tuning_stage_a_candidate_count": min(config.tuning_stage_a_candidate_count, len(build_tuning_candidate_grid())),
             "tuning_stage_b_top_n": config.tuning_stage_b_top_n,
             "tuning_stage_a_months": ",".join(config.tuning_stage_a_months),
         }
@@ -1200,11 +1336,12 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
             categorical_feature_columns=FE_CATEGORICAL_FEATURES,
             params=fe_params,
             random_state=config.random_state,
+            model_artifact_dir=reset_stage_model_dir(stage_model_dir(config, "stage_04_catboost_tuned")),
         )
         tuned_model.fit(
-            train_df,
+            fe_train_df,
             list(config.target_columns),
-            eval_df=fit_eval_df,
+            eval_df=fe_fit_eval_df,
             early_stopping_rounds=config.catboost_early_stopping_rounds,
         )
         tuned_valid_metrics, tuned_valid_errors = evaluate_model_on_months(config, tuned_model, fe_feature_columns, config.valid_months, "valid")
@@ -1228,10 +1365,12 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
         params=tuned_result_params,
         notes=tuned_notes,
         extra_artifacts={**tuning_artifacts, **support_artifacts},
+        compute_feature_importance=True,
     )
     experiment_results.append(tuned_result)
     log_stage(5, "stage_04_catboost_tuned", f"done | {config.primary_metric_name}={primary_metric_value(config, tuned_valid_metrics.metrics):.5f}")
-    release_memory(tuned_model, tuned_valid_errors, tuned_test_errors)
+    del tuned_model, tuned_valid_metrics, tuned_valid_errors, tuned_test_metrics, tuned_test_errors, fe_fit_eval_df, fe_train_df
+    gc.collect()
 
     split_summary_path = config.models_dir / "split_summary.csv"
     experiment_leaderboard_path = config.models_dir / "experiment_leaderboard.csv"
@@ -1239,7 +1378,13 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
     build_experiment_leaderboard_frame(config, experiment_results).to_csv(experiment_leaderboard_path, index=False)
 
     catboost_results = [result for result in experiment_results if result.model_name.startswith("catboost")]
-    selected_result = max(catboost_results, key=lambda item: primary_metric_value(config, item.valid_metrics))
+    selected_result = max(
+        catboost_results,
+        key=lambda item: (
+            primary_metric_value(config, item.valid_metrics),
+            CATBOOST_STAGE_PRIORITY.get(item.stage_name, 0),
+        ),
+    )
     logger.info(
         "Selecting best CatBoost stage | stage=%s | %s=%.5f",
         selected_result.stage_name,
@@ -1249,10 +1394,12 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
 
     metadata_path = build_metadata(config, experiment_results, selected_result)
     logger.info("Registering model in MLflow Model Registry | name=%s | alias=%s", config.mlflow_registered_model_name, config.mlflow_model_alias)
-    registry_input_example = train_df[selected_result.feature_columns].head(10).copy()
+    registry_example_month = load_modeling_month(config, config.train_months[-1], columns=selected_result.feature_columns)
+    registry_input_example = registry_example_month[selected_result.feature_columns].head(10).copy()
     selected_result.registry_version = register_best_model(config, selected_result, metadata_path, registry_input_example)
     metadata_path = build_metadata(config, experiment_results, selected_result)
-    release_memory(registry_input_example, fit_eval_df)
+    del registry_input_example, registry_example_month
+    gc.collect()
 
     selected_bundle_path = Path(selected_result.artifacts["bundle_path"]) if selected_result.artifacts else config.models_dir / f"{selected_result.stage_name}.joblib"
     best_bundle = joblib.load(selected_bundle_path)
@@ -1262,6 +1409,7 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
     best_bundle["registered_model_version"] = selected_result.registry_version
     best_bundle["metrics"] = json.loads(metadata_path.read_text(encoding="utf-8"))["stages"]
     best_bundle["artifact_paths"] = {
+        **(selected_result.artifacts or {}),
         **{name: str(path) for name, path in support_artifacts.items()},
         "split_summary_path": str(split_summary_path),
         "experiment_leaderboard_path": str(experiment_leaderboard_path),
@@ -1272,8 +1420,6 @@ def run_training(config: ProjectConfig, force_prepare: bool = False) -> dict[str
     categorical_features_path = config.models_dir / "categorical_features.json"
     feature_list_path.write_text(json.dumps(selected_result.feature_columns, indent=2, ensure_ascii=False), encoding="utf-8")
     categorical_features_path.write_text(json.dumps(selected_result.categorical_feature_columns, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    release_memory(train_df)
 
     total_elapsed = time.perf_counter() - started_at
     logger.info(

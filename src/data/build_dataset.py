@@ -8,8 +8,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.data.constants import CATEGORICAL_COLUMNS, NUMERIC_COLUMNS, PRODUCT_COLUMNS
+from src.data.constants import CATEGORICAL_COLUMNS, MONTHLY_DATASET_COLUMNS, NUMERIC_COLUMNS, PRODUCT_COLUMNS
 from src.data.load import dataset_month_path, load_month_frame, split_raw_to_monthly_files
+from src.data.preprocess import optimize_modeling_frame_dtypes
 from src.features.feature_engineering import add_prev_month_deltas, add_snapshot_features
 from src.features.target_builder import build_multilabel_target
 from src.utils.config import ProjectConfig, ensure_directories
@@ -18,6 +19,16 @@ from src.utils.config import ProjectConfig, ensure_directories
 def list_available_months(config: ProjectConfig) -> list[str]:
     split_raw_to_monthly_files(config)
     return sorted(path.stem for path in config.monthly_dir.glob("*.csv"))
+
+
+def modeling_target_columns() -> list[str]:
+    return [f"target__{column}" for column in PRODUCT_COLUMNS]
+
+
+def project_modeling_frame(df: pd.DataFrame) -> pd.DataFrame:
+    required_columns = [*MONTHLY_DATASET_COLUMNS, *modeling_target_columns(), "target_count"]
+    projected = df.loc[:, [column for column in required_columns if column in df.columns]].copy()
+    return optimize_modeling_frame_dtypes(projected)
 
 
 def build_monthly_modeling_dataset(config: ProjectConfig, force: bool = False) -> list[Path]:
@@ -45,20 +56,21 @@ def build_monthly_modeling_dataset(config: ProjectConfig, force: bool = False) -
         current_df = add_snapshot_features(current_df)
         current_df = add_prev_month_deltas(current_df, prev_df)
         current_df = build_multilabel_target(current_df, next_df)
+        current_df = project_modeling_frame(current_df)
         current_df.to_parquet(output_path, index=False)
 
     return sorted(config.modeling_dir.glob("*.parquet"))
 
 
-def load_modeling_month(config: ProjectConfig, month: str) -> pd.DataFrame:
+def load_modeling_month(config: ProjectConfig, month: str, columns: list[str] | None = None) -> pd.DataFrame:
     path = dataset_month_path(config, month)
     if not path.exists():
         raise FileNotFoundError(f"Modeling month dataset not found: {path}")
-    return pd.read_parquet(path)
+    return pd.read_parquet(path, columns=columns)
 
 
-def load_split_dataframe(config: ProjectConfig, months: tuple[str, ...]) -> pd.DataFrame:
-    frames = [load_modeling_month(config, month) for month in months]
+def load_split_dataframe(config: ProjectConfig, months: tuple[str, ...], columns: list[str] | None = None) -> pd.DataFrame:
+    frames = [load_modeling_month(config, month, columns=columns) for month in months]
     if not frames:
         raise ValueError("No months provided for split loading")
     return pd.concat(frames, ignore_index=True)
@@ -126,7 +138,10 @@ def build_eda_artifacts(config: ProjectConfig) -> dict[str, Path]:
 
         modeling_path = dataset_month_path(config, month)
         if modeling_path.exists():
-            modeling_df = pd.read_parquet(modeling_path, columns=["target_month", "target_count", *[f"target__{col}" for col in PRODUCT_COLUMNS]])
+            modeling_df = pd.read_parquet(
+                modeling_path,
+                columns=["target_month", "target_count", *modeling_target_columns()],
+            )
             additions_rows.append(
                 pd.DataFrame(
                     {

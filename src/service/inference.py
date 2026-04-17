@@ -25,12 +25,16 @@ class InferenceResult:
 class RecommendationInferenceService:
     """Thin wrapper around the trained model bundle."""
 
-    def __init__(self, model_path: Path) -> None:
+    def __init__(self, model_path: Path, *, preload_product_models: bool = True) -> None:
         self.model_path = model_path
+        self.preload_product_models = preload_product_models
         self.bundle: dict[str, Any] | None = None
 
     def load(self) -> None:
         self.bundle = joblib.load(self.model_path)
+        model = self.bundle.get("model")
+        if self.preload_product_models and hasattr(model, "enable_inference_cache"):
+            model.enable_inference_cache(preload=True)
 
     @property
     def loaded(self) -> bool:

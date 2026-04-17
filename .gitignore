@@ -18,3 +18,5 @@ train_ver2.csv
 task*
 *.joblib
 *.csv
+*.cbm
+*.json

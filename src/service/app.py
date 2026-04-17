@@ -27,7 +27,10 @@ app = FastAPI(
     description="REST API that ranks new banking products for an existing client profile.",
     version="1.0.0",
 )
-inference_service = RecommendationInferenceService(config.api_model_path)
+inference_service = RecommendationInferenceService(
+    config.api_model_path,
+    preload_product_models=config.api_preload_product_models,
+)
 
 
 @app.on_event("startup")
