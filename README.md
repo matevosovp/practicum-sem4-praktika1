@@ -77,13 +77,15 @@
 
 ### Моделирование
 
-Реализованы два подхода:
+Эксперименты выстроены как поэтапная лестница улучшений:
 
-- baseline 1: глобальная популярность продукта по частоте следующего подключения;
-- baseline 2: сегментная популярность (`segmento`) со сглаживанием;
-- supervised experiment: `OneVsRest(SGDClassifier loss="log_loss")` с числовыми, категориальными и продуктовыми признаками.
+- `stage_00_global_popularity`: самый простой baseline по глобальной частоте новых подключений;
+- `stage_01_segment_popularity`: baseline после улучшения сегментацией по `segmento`;
+- `stage_02_catboost_basic`: первая CatBoost-модель на сырых клиентских признаках и текущем продуктном портфеле;
+- `stage_03_catboost_feature_engineering`: CatBoost после добавления engineered temporal / portfolio features;
+- `stage_04_catboost_tuned`: финальный CatBoost после двухступенчатого, ресурсно-ограниченного подбора гиперпараметров.
 
-По sampled backtest на holdout-периодах лучшей офлайн-моделью оказался **segment popularity baseline**, поэтому именно он сохраняется в `models/best_model.joblib` и используется в API. Supervised-модель сохранена отдельно в `models/supervised_model.joblib`.
+Итоговая основная модель проекта — **CatBoost**. Для продового артефакта `best_model.joblib` выбирается лучшая именно среди CatBoost-стадий, а baseline'ы остаются как честная точка сравнения.
 
 Пайплайн включает:
 
@@ -92,17 +94,27 @@
 - формирование multilabel-таргета на `t+1`;
 - time-based split;
 - downsampling негативных примеров на train без затрагивания validation/test;
+- ограничение полного train sample через cap `TRAIN_MAX_ROWS`, чтобы CatBoost не раздувался по памяти на редких продуктах;
+- CatBoost с нативной работой по категориальным признакам без ручного one-hot;
+- фиксированный `eval_set` и `early_stopping` для всех CatBoost-стадий;
+- двухступенчатый tuning вместо тяжелого глобального поиска:
+  - Stage A: быстрый screening небольшого ручного набора конфигураций на последних train-месяцах и sampled validation;
+  - Stage B: подтверждение только top-N конфигураций на полном train sample;
 - расчёт ranking-метрик и анализ ошибок.
 
 ### MLflow
 
-Логируются:
+Логируются отдельные runs для каждой стадии улучшения:
 
 - параметры эксперимента;
 - ranking-метрики на validation и test;
-- модель;
-- артефакты анализа ошибок и важности признаков;
-- входной пример и сигнатура модели.
+- одна главная scalar-метрика `val_map_at_3` для удобного сравнения runs;
+- модель и bundle-артефакты;
+- артефакты анализа ошибок и важности признаков для CatBoost-стадий;
+- отдельные MLflow runs для всех tuning-кандидатов из Stage A и Stage B;
+- leaderboard'ы `stage_04_stage_a_leaderboard.csv` и `stage_04_stage_b_leaderboard.csv` для tuned-стадии.
+
+Лучший CatBoost-run дополнительно регистрируется в **MLflow Model Registry** под именем `bank-product-recommendations-catboost` и получает alias `champion`.
 
 Хранилище по умолчанию локальное:
 
@@ -119,25 +131,23 @@ Endpoint'ы:
 - `POST /predict`
 - `GET /metrics`
 
-`POST /predict` принимает текущий профиль клиента и список уже имеющихся продуктов, а в ответ возвращает `top_k` новых рекомендаций со score.
+`POST /predict` принимает текущий профиль клиента и список уже имеющихся продуктов, а в ответ возвращает `top_k` новых рекомендаций со score. Скоринг строится на выходах CatBoost-модели, а уже имеющиеся продукты принудительно исключаются из top-k.
 
 ## Результаты экспериментов
 
 Отложенная оценка считалась на sampled holdout-месяцах по `120,000` клиентов на месяц с фиксированным `random_state=42`.
 
-Validation:
+Текущая идея сравнения не в “зоопарке моделей”, а в понятной траектории улучшений:
 
-- `global popularity`: `MAP@3 = 0.5849`, `NDCG@3 = 0.6502`, `Precision@3 = 0.0789`
-- `segment popularity`: `MAP@3 = 0.6215`, `NDCG@3 = 0.6592`, `Precision@3 = 0.0796`
-- `supervised SGD`: `MAP@3 = 0.1840`, `NDCG@3 = 0.2264`, `Precision@3 = 0.0330`
+- что даёт простой baseline;
+- что даёт более сильный baseline;
+- что даёт переход к CatBoost как основной модели;
+- что даёт feature engineering;
+- что даёт более устойчивый двухступенчатый tuning.
 
-Test:
+Главная метрика для сравнения runs в MLflow: `val_map_at_3`.
 
-- `global popularity`: `MAP@3 = 0.5753`, `NDCG@3 = 0.6415`, `Precision@3 = 0.0704`
-- `segment popularity`: `MAP@3 = 0.6180`, `NDCG@3 = 0.6546`, `Precision@3 = 0.0701`
-- `supervised SGD`: `MAP@3 = 0.1851`, `NDCG@3 = 0.2277`, `Precision@3 = 0.0306`
-
-Практический вывод: в этих данных сильный popularity-сигнал, а сегментное сглаживание даёт лучший ranking, чем и глобальная популярность, и текущая линейная supervised-модель. Поэтому в продовый артефакт вынесен именно segment-based baseline, а supervised-пайплайн оставлен как воспроизводимый эксперимент с артефактами ошибок и коэффициентов.
+Актуальные метрики сохраняются в `models/model_metadata.json` и в MLflow по каждому stage-run отдельно.
 
 ### Мониторинг
 
@@ -183,6 +193,19 @@ source .venv_rec_prod/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
+## Как запустить MLflow
+
+```bash
+source .venv_rec_prod/bin/activate
+bash scripts/run_mlflow.sh
+```
+## Как запустить обучение
+
+```bash
+source .venv_rec_prod/bin/activate
+bash scripts/train_model.sh
+```
+
 
 ## Как запустить EDA
 
@@ -193,37 +216,32 @@ source .venv_rec_prod/bin/activate
 python -m src.models.train
 ```
 
-После этого открыть ноутбук:
+После этого открыть ноутбук 01_eda.ipynb
+
+
+Если нагрузку на машину, можно запускать так:
 
 ```bash
-jupyter notebook notebooks/01_eda.ipynb
+CATBOOST_THREAD_COUNT=2 CATBOOST_TUNING_ENABLED=true TRAIN_MAX_ROWS=300000 TUNING_STAGE_A_MAX_ROWS=120000 bash scripts/train_model.sh
 ```
 
-## Как запустить обучение
+Если нужен только быстрый smoke-прогон без hyperparameter search:
 
 ```bash
-source .venv_rec_prod/bin/activate
-bash scripts/train_model.sh
+CATBOOST_THREAD_COUNT=2 CATBOOST_TUNING_ENABLED=false TRAIN_MAX_ROWS=150000 EVAL_MONTH_SAMPLE_SIZE=40000 bash scripts/train_model.sh
 ```
 
-Полезные выходы после обучения:
 
-- `models/best_model.joblib`
-- `models/supervised_model.joblib`
-- `models/model_metadata.json`
-- `models/feature_importance.csv`
-- `models/validation_errors.csv`
-- `models/test_errors.csv`
-- `models/reference_stats.json`
 
-## Как запустить MLflow
-
-```bash
-source .venv_rec_prod/bin/activate
-bash scripts/run_mlflow.sh
-```
 
 После старта UI доступен на `http://localhost:5000`.
+
+В UI нужно смотреть:
+
+- runs внутри эксперимента `bank-product-recommendations`;
+- scalar metric `val_map_at_3` для сравнения стадий и tuning-кандидатов;
+- раздел **Models**, где зарегистрирована `bank-product-recommendations-catboost`;
+- alias `champion`, который указывает на текущую основную версию CatBoost-модели.
 
 ## Как запустить API локально
 
@@ -270,12 +288,18 @@ docker compose up --build
 
 ## Артефакты модели
 
-- `best_model.joblib` — основной bundle с лучшей офлайн-моделью `segment_popularity`;
-- `supervised_model.joblib` — отдельный bundle с supervised `SGD`-экспериментом;
+- `best_model.joblib` — основной bundle с лучшей CatBoost-стадией по validation `MAP@3`;
+- `stage_00_*.joblib ... stage_04_*.joblib` — отдельные артефакты каждой стадии;
 - `product_mapping.json` — человекочитаемые названия продуктов;
 - `reference_stats.json` — база для простого drift-check в API;
-- `feature_importance.csv` — топ коэффициентов именно для supervised-модели;
-- `validation_errors.csv` / `test_errors.csv` — примеры промахов модели.
+- `experiment_leaderboard.csv` — единая таблица сравнения baseline / CatBoost / tuned CatBoost;
+- `split_summary.csv` — помесячная сводка train / validation / test для ноутбука и ревью;
+- `feature_list.json` / `categorical_features.json` — зафиксированный список признаков для продового CatBoost bundle;
+- `stage_*_feature_importance.csv` — топ важностей признаков для CatBoost-стадий;
+- `stage_*_validation_errors.csv` / `stage_*_test_errors.csv` — примеры промахов для CatBoost-стадий;
+- `stage_04_stage_a_leaderboard.csv` — результаты быстрого screening-а конфигураций;
+- `stage_04_stage_b_leaderboard.csv` — результаты финального подтверждения top-N конфигураций;
+- `stage_04_tuning_summary.json` — краткое описание новой стратегии подбора.
 
 ## Retraining-подход
 
@@ -284,14 +308,14 @@ docker compose up --build
 1. Появился новый месячный снапшот.
 2. Пайплайн пересобирает `t -> t+1` выборки.
 3. Переобучается модель со скользящим историческим окном.
-4. Обновляются MLflow-эксперименты и `reference_stats.json`.
+4. Обновляются MLflow-эксперименты, leaderboard'ы тюнинга, `reference_stats.json` и alias `champion` в Model Registry.
 5. После smoke-check выкатывается новый `best_model.joblib`.
 
 Для автоматического запуска подготовлен [retrain.py](/home/what/praktika/practicum-sem4-praktika1/scripts/retrain.py).
 
 ## Ограничения текущего решения
 
-- В текущем наборе признаков supervised-линейная модель уступила сегментному popularity baseline.
+- На текущих данных сильный popularity-сигнал всё ещё может быть конкурентным по сравнению с CatBoost.
 - В офлайне пока нет отдельной калибровки score.
 - Для ускорения обучения негативные примеры на train семплируются.
 - В drift-контроле реализован разумный минимум, а не полноценный отдельный сервис мониторинга данных.

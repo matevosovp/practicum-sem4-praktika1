@@ -29,6 +29,9 @@ class ProjectConfig:
     mlruns_dir: Path = Path(_env("MLRUNS_DIR", "mlruns"))
     mlflow_tracking_uri: str = _env("MLFLOW_TRACKING_URI", "sqlite:///mlruns/mlflow.db")
     mlflow_experiment: str = _env("MLFLOW_EXPERIMENT", "bank-product-recommendations")
+    mlflow_registered_model_name: str = _env("MLFLOW_REGISTERED_MODEL_NAME", "bank-product-recommendations-catboost")
+    mlflow_model_alias: str = _env("MLFLOW_MODEL_ALIAS", "champion")
+    primary_metric_name: str = _env("PRIMARY_METRIC_NAME", "val_map_at_3")
     train_months: tuple[str, ...] = tuple(
         _env(
             "TRAIN_MONTHS",
@@ -39,9 +42,19 @@ class ProjectConfig:
     valid_months: tuple[str, ...] = tuple(_env("VALID_MONTHS", "2015-12-28,2016-01-28,2016-02-28").split(","))
     test_months: tuple[str, ...] = tuple(_env("TEST_MONTHS", "2016-03-28,2016-04-28").split(","))
     chunk_size: int = int(_env("CSV_CHUNK_SIZE", "200000"))
-    negative_sample_ratio: float = float(_env("NEGATIVE_SAMPLE_RATIO", "0.8"))
+    negative_sample_ratio: float = float(_env("NEGATIVE_SAMPLE_RATIO", "0.6"))
+    train_max_rows: int = int(_env("TRAIN_MAX_ROWS", "350000"))
     eval_month_sample_size: int = int(_env("EVAL_MONTH_SAMPLE_SIZE", "120000"))
     top_k: int = int(_env("TOP_K", "3"))
+    catboost_thread_count: int = int(_env("CATBOOST_THREAD_COUNT", "4"))
+    catboost_tuning_enabled: bool = _env("CATBOOST_TUNING_ENABLED", "true").lower() == "true"
+    catboost_early_stopping_rounds: int = int(_env("CATBOOST_EARLY_STOPPING_ROUNDS", "40"))
+    catboost_fit_eval_size: int = int(_env("CATBOOST_FIT_EVAL_SIZE", "40000"))
+    catboost_ram_limit: str = _env("CATBOOST_RAM_LIMIT", "12gb")
+    tuning_stage_a_month_count: int = int(_env("TUNING_STAGE_A_MONTH_COUNT", "4"))
+    tuning_stage_a_max_rows: int = int(_env("TUNING_STAGE_A_MAX_ROWS", "180000"))
+    tuning_stage_a_eval_size: int = int(_env("TUNING_STAGE_A_EVAL_SIZE", "40000"))
+    tuning_stage_b_top_n: int = int(_env("TUNING_STAGE_B_TOP_N", "2"))
     monthly_dir_name: str = "monthly"
     modeling_dir_name: str = "modeling"
     feature_columns: tuple[str, ...] = field(
@@ -98,6 +111,11 @@ class ProjectConfig:
     @property
     def modeling_dir(self) -> Path:
         return self.processed_dir / self.modeling_dir_name
+
+    @property
+    def tuning_stage_a_months(self) -> tuple[str, ...]:
+        month_count = max(1, min(self.tuning_stage_a_month_count, len(self.train_months)))
+        return self.train_months[-month_count:]
 
 
 def ensure_directories(config: ProjectConfig) -> None:

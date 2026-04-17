@@ -44,6 +44,9 @@ class RecommendationInferenceService:
         feature_row: dict[str, Any] = {}
         current_products = set(request.current_products)
 
+        for column in PRODUCT_COLUMNS:
+            feature_row[column] = int(column in current_products)
+
         for column in self.bundle["feature_columns"]:
             if column in PRODUCT_COLUMNS:
                 feature_row[column] = int(column in current_products)

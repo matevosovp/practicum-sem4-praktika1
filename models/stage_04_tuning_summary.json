@@ -1,0 +1,13 @@
+{
+  "strategy": "two_stage_manual_screening",
+  "primary_metric_name": "val_map_at_3",
+  "stage_a_train_months": [
+    "2015-10-28"
+  ],
+  "stage_a_candidate_count": 5,
+  "stage_b_top_n": 1,
+  "stage_a_sample_rows": 10000,
+  "stage_a_eval_rows": 2000,
+  "stage_b_eval_rows": 3000,
+  "best_candidate_metric": 0.5861666666666676
+}
