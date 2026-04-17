@@ -1,5 +1,4 @@
 .env
-.env.*
 .venv*
 .code*
 __pycache__/
