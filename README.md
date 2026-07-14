@@ -1,6 +1,15 @@
 # Рекомендации банковских продуктов
 
+[![Quality checks](https://github.com/matevosovp/practicum-sem4-praktika1/actions/workflows/quality.yml/badge.svg)](https://github.com/matevosovp/practicum-sem4-praktika1/actions/workflows/quality.yml)
+
 Учебный ML-проект, в котором по ежемесячным клиентским снапшотам банка строится система рекомендаций новых продуктов на следующий месяц.
+
+## Коротко о результате
+
+- **Test MAP@3: 0.6527** у tuned CatBoost против **0.5753** у глобального popularity baseline.
+- Валидация построена по времени: будущие месяцы не попадают в обучение.
+- Реализован полный контур: подготовка данных → эксперименты → MLflow Registry → FastAPI → Prometheus.
+- Код рассчитан на воспроизводимый локальный запуск и работу с данными по частям без загрузки всего CSV в память.
 
 ## Бизнес-задача
 
@@ -66,7 +75,7 @@
 
 ### EDA
 
-Ноутбук [01_eda.ipynb](/home/what/praktika/practicum-sem4-praktika1/notebooks/01_eda.ipynb) строится поверх кода из `src/` и анализирует:
+Ноутбук [01_eda.ipynb](notebooks/01_eda.ipynb) строится поверх кода из `src/` и анализирует:
 
 - структуру данных и временную динамику;
 - пропуски и грязные значения;
@@ -99,7 +108,7 @@
 - one-vs-rest CatBoost: продуктовые модели обучаются последовательно и сохраняются в stage-директорию;
 - CatBoost с нативной работой по категориальным признакам без ручного one-hot;
 - фиксированный `eval_set` и `early_stopping` для всех CatBoost-стадий;
-- двухступенчатый tuning вместо тяжелого глобального поиска:
+- двухступенчатый tuning вместо тяжёлого глобального поиска:
   - Stage A: быстрый screening компактного ручного набора конфигураций на последних train-месяцах и sampled validation;
   - Stage B: подтверждение только top-N конфигураций на полном train sample;
 - feature importance только для осмысленных CatBoost-стадий, а не для каждого промежуточного run;
@@ -126,9 +135,9 @@
 
 ### API
 
-FastAPI-сервис находится в [app.py](/home/what/praktika/practicum-sem4-praktika1/src/service/app.py).
+FastAPI-сервис находится в [app.py](src/service/app.py).
 
-Endpoint'ы:
+Эндпоинты:
 
 - `GET /health`
 - `POST /predict`
@@ -152,7 +161,7 @@ Endpoint'ы:
 
 Актуальные метрики сохраняются в `models/model_metadata.json` и в MLflow по каждому stage-run отдельно.
 
-На актуальном прогоне из [02_modeling_experiments.ipynb](/home/what/praktika/practicum-sem4-praktika1/notebooks/02_modeling_experiments.ipynb) получились такие результаты:
+На актуальном прогоне из [02_modeling_experiments.ipynb](notebooks/02_modeling_experiments.ipynb) получились такие результаты:
 
 | Stage | Validation MAP@3 | Test MAP@3 |
 | --- | ---: | ---: |
@@ -185,7 +194,7 @@ Endpoint'ы:
 - `bank_reco_empty_total`
 - `bank_reco_suspicious_total`
 
-Подробности — в [MONITORING.md](/home/what/praktika/practicum-sem4-praktika1/monitoring/MONITORING.md).
+Подробности — в [MONITORING.md](monitoring/MONITORING.md).
 
 ## Структура репозитория
 
